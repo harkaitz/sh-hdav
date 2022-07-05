@@ -1,0 +1,191 @@
+#!/bin/sh -e
+#L:
+#L:  MIT License
+#L:  
+#l:  Bug reports, feature requests to gemini|https://harkadev.com/oss
+#l:  Copyright (c) 2022 Harkaitz Agirre, harkaitz.aguirre@gmail.com
+#L:
+#L:  Permission is hereby granted, free of charge, to any person obtaining
+#L:  a copy of this software and associated documentation files (the
+#L:  "Software"), to deal in the Software without restriction, including
+#L:  without limitation the rights to use, copy, modify, merge, publish,
+#L:  distribute, sublicense, and/or sell copies of the Software, and to
+#L:  permit persons to whom the Software is furnished to do so, subject to
+#L:  the following conditions:
+#L:
+#L:  The above copyright notice and this permission notice shall be
+#L:  included in all copies or substantial portions of the Software.
+#L:
+#L:  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+#L:  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+#L:  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+#L:  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+#L:  LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+#L:  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+#L:  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+##:
+#h: Usage: $0 ...
+#h:
+#h:     -V              : Show configuration.
+#h:     -v              : Verbose mode.
+#h:     -p PATH         : Path to use.
+#h:     -u NEW=FILE ... : Upload files.
+#h:     -d FILE ...     : Download files.
+#h:     -o DIR          : Download directory.
+#h:     -l              : List files.
+##:
+##: https://code.blogs.iiidefix.net/posts/webdav-with-curl/
+##: https://www.qed42.com/insights/coe/drupal/using-curl-commands-webdav
+##:
+hdav() {
+    local OPTIND optopt opt_V='' opt_l='' opt_u=''
+    ## Parse command line arguments.
+    while getopts "Vvp:dulo:" optopt; do # OPTARG
+        case $optopt in
+            V)  opt_V="y" ;; u) opt_u="y";;
+            l)  opt_l="y" ;; d) opt_d="y";;
+            v)  local VERBOSE="y";;
+            p)  local HDAV_PATH="${OPTARG}"  ;;
+            o)  local HDAV_CACHE="${OPTARG}" ;;
+            \?) return 1  ;;
+        esac
+    done
+    shift $(( $OPTIND - 1 ))
+    ## Show configuration.
+    if test -n "${opt_V}"; then
+        hdav_show_variables
+        return 1
+    fi
+    ## Check programs.
+    hdav_check_programs_and_variables
+    ## Operations.
+    if test -n "${opt_l}"; then
+        hdav_list
+    elif test -n "${opt_u}"; then
+        hdav_upload "$@"
+    elif test -n "${opt_d}"; then
+        hdav_download "$@"
+    fi
+}
+hdav_show_variables() {
+    printf '%-20s : %s\n'            \
+           HDAV_URL   "${HDAV_URL}"  \
+           HDAV_USER  "${HDAV_USER}" \
+           HDAV_PASS  "${HDAV_PASS}" \
+           HDAV_PATH  "${HDAV_PATH}" \
+           VERBOSE    "${VERBOSE}"
+}
+hdav_check_programs_and_variables() {
+    local ret=0
+    if ! which curl >/dev/null 2>&1; then
+        error "Missing command: curl"
+        ret=1
+    fi
+    if ! which xml2 >/dev/null 2>&1; then
+        error "Missing command: xml2"
+        ret=1
+    fi
+    if test ! -n "${HDAV_URL}"; then
+        error "Missing env variable: HDAV_URL"
+        ret=1
+    fi
+    if test ! -n "${HDAV_USER}"; then
+        error "Missing env variable: HDAV_USER"
+        ret=1
+    fi
+    if test ! -n "${HDAV_PASS}"; then
+        error "Missing env variable: HDAV_PASS"
+        ret=1
+    fi
+    return $ret
+}
+## -----------------------------------------------------------------------------
+hdav_list() {
+    curl -s                             \
+         -u "${HDAV_USER}:${HDAV_PASS}" \
+         -X PROPFIND                    \
+         "${HDAV_URL}/${HDAV_PATH}"     \
+         --upload-file -                \
+         -H "Depth: 1" <<-EOF           \
+        | xml2                          \
+        | sed -n 's|.*:href=/\(..*\)|\1|p'
+	<?xml version="1.0"?>
+	<a:propfind xmlns:a="DAV:">
+	<a:prop><a:resourcetype/></a:prop>
+	</a:propfind>
+	EOF
+}
+hdav_upload() {
+    local a='' f='' t=''
+    for a in "$@"; do
+        t="`echo "${a}" | cut -d = -f 1`"
+        f="`echo "${a}" | cut -d = -f 2`"
+        if test ! -n "${f}"; then
+            f="${t}" t="`basename "${t}"`"
+        fi
+        t="`echo "${t}" | url_encode`"
+        verbose "${HDAV_URL}/${HDAV_PATH}/${t}"
+        curl -s -u "${HDAV_USER}:${HDAV_PASS}" -T "${f}" "${HDAV_URL}/${HDAV_PATH}/${t}" >/dev/null
+    done
+}
+hdav_download() {
+    local a='' f=''
+    for a in "$@"; do
+        f="${HDAV_URL}/${HDAV_PATH}/`echo "${a}" | url_encode`"
+        t="${HDAV_CACHE}/`basename "${a}"`"
+        if test ! -f "${t}"; then
+            verbose "${f}"
+            mkdir -p "${HDAV_CACHE}"
+            curl -s -u "${HDAV_USER}:${HDAV_PASS}" -o "${t}.tmp" "${f}"
+            if test @"`head -n 1 "${t}.tmp"`" = @"Not Found"; then
+                error "Not Found"
+                rm -f "${t}.tmp"
+                return 1
+            else
+                mv "${t}.tmp" "${t}"
+            fi
+        fi
+        echo "${t}"
+    done
+}
+## -----------------------------------------------------------------------------
+url_encode() {
+    sed 's/ /%20/g
+         s/!/%21/g
+         s/"/%22/g
+         s/#/%23/g
+         s/\$/%24/g
+         s/\&/%26/g
+         s/'\''/%27/g
+         s/(/%28/g
+         s/)/%29/g
+         s/:/%3A/g'
+}
+url_decode() {
+    awk -v RS='%[0-9a-fA-F]{2}' '
+         RT{
+            sub("%","0x",RT)
+            RT=sprintf("%c",strtonum(RT))
+         }
+         {
+            gsub(/\+/," ")
+            printf "%s", $0 RT
+         }'
+}
+## -----------------------------------------------------------------------------
+error()   { echo "${SCRNAME}: $*" >&2; }
+verbose() { test ! -n "${VERBOSE}" || echo "${SCRNAME}: $*" >&2; }
+SCRNAME="`basename "$0"`"
+HDAV_CACHE="${HDAV_CACHE:-${HOME}/.local/cache}"
+if test @"${SCRNAME}" = @"hdav";then
+    case "${1}" in
+        ''|-h|--help)
+            sed -n 's/^ *#h: \{0,1\}//p' "$0" | sed "s|\\\$0|${SCRNAME}|g"
+            echo ""
+            sed -n 's/^ *#l: \{0,2\}//p' "$0"
+            ;;
+        *)
+            hdav "$@"
+            ;;
+    esac
+fi
